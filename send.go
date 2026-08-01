@@ -186,6 +186,7 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 		err = ErrClientIsNil
 		return
 	}
+	cli.Log.Warnf("DEBUGLID entry to=%s user=%s server=%s device=%d ownID=%s", to, to.User, to.Server, to.Device, cli.getOwnID())
 	var req SendRequestExtra
 	if len(extra) > 1 {
 		err = errors.New("only one extra parameter may be provided to SendMessage")
