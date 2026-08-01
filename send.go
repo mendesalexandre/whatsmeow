@@ -326,29 +326,39 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 			cli.Log.Warnf("Failed to get peer recipient PN for %s: %v", to, err)
 		}
 	} else if to.Server == types.DefaultUserServer && !req.Peer {
+		// Fork patch (mendesalexandre/whatsmeow, feat/lid-fallback-to-phone-number):
+		// upstream treats "couldn't resolve LID" as fatal and aborts the whole
+		// send (SendMessage returns an error, nothing goes out). That regressed
+		// real sends in production for contacts whose LID isn't resolvable yet
+		// (server lookup miss, transient error, or the account genuinely hasn't
+		// migrated to LID-first). Falling back to the plain phone-number JID —
+		// the only behavior that existed before LID support was added — keeps
+		// the message going out instead of failing hard. When a LID DOES
+		// resolve, behavior is unchanged from upstream.
 		start := time.Now()
 		var toLID types.JID
-		toLID, err = cli.Store.LIDs.GetLIDForPN(ctx, to)
-		if err != nil {
-			err = fmt.Errorf("failed to get LID for PN %s: %w", to, err)
-			return
+		toLID, lidErr := cli.Store.LIDs.GetLIDForPN(ctx, to)
+		if lidErr != nil {
+			cli.Log.Warnf("Failed to get LID for PN %s, falling back to phone-number JID: %v", to, lidErr)
+			toLID = types.EmptyJID
 		} else if toLID.IsEmpty() {
-			var info map[types.JID]types.UserInfo
 			cli.Log.Debugf("LID for %s not found, fetching user info", to)
-			info, err = cli.GetUserInfo(ctx, []types.JID{to})
-			if err != nil {
-				err = fmt.Errorf("failed to get user info for %s to fill LID cache: %w", to, err)
-				return
-			} else if toLID = info[to].LID; toLID.IsEmpty() {
-				err = fmt.Errorf("no LID found for %s from server", to)
-				return
+			info, infoErr := cli.GetUserInfo(ctx, []types.JID{to})
+			if infoErr != nil {
+				cli.Log.Warnf("Failed to get user info for %s, falling back to phone-number JID: %v", to, infoErr)
+			} else if fetched := info[to].LID; !fetched.IsEmpty() {
+				toLID = fetched
+			} else {
+				cli.Log.Warnf("No LID found for %s from server, falling back to phone-number JID", to)
 			}
 		}
 		resp.DebugTimings.LIDFetch = time.Since(start)
-		cli.Log.Debugf("Replacing SendMessage destination with LID %s -> %s", to, toLID)
-		extraParams.peerRecipientPN = to
-		to = toLID
-		ownID = cli.getOwnLID()
+		if !toLID.IsEmpty() {
+			cli.Log.Debugf("Replacing SendMessage destination with LID %s -> %s", to, toLID)
+			extraParams.peerRecipientPN = to
+			to = toLID
+			ownID = cli.getOwnLID()
+		}
 	}
 	if req.Meta != nil {
 		extraParams.metaNode = &waBinary.Node{
